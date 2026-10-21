@@ -1,4 +1,4 @@
-name: Build Simplified Chinese IPA
+name: Build Simplified Chinese IPA and TrollStore TIPA
 
 on:
   workflow_dispatch:
@@ -7,6 +7,10 @@ on:
       - main
     paths:
       - '.github/workflows/build-zh-hans.yml'
+      - 'tools/release/**'
+      - 'browser/Reynard/Entitlements/**'
+      - 'browser/Helper/Entitlements/**'
+      - 'browser/Reynard/JIT/Unsandboxed/**'
       - 'browser/Reynard/Resources/Localizable.xcstrings'
       - 'browser/Reynard/Client/Interface/**/AddonLocalizable.xcstrings'
       - 'browser/Reynard/Client/Interface/**/SettingsLocalizable.xcstrings'
@@ -21,7 +25,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build unsigned iOS IPA (arm64)
+    name: Build Chinese IPA and TrollStore TIPA (arm64)
     runs-on: macos-26
     timeout-minutes: 360
     env:
@@ -94,10 +98,52 @@ jobs:
       - name: Package IPA
         run: ./tools/release/create-ipa.sh
 
+      - name: Package TrollStore TIPA with private entitlements and JIT helper
+        run: ./tools/release/create-ipa.sh --trollstore
+
+      - name: Verify Chinese resources and TrollStore package
+        run: |
+          python3 - <<'PY'
+          import plistlib
+          import subprocess
+          import zipfile
+          from pathlib import Path
+
+          prefix = 'Payload/Reynard.app/'
+          for package in ('Reynard.ipa', 'Reynard-TrollStore.tipa'):
+              with zipfile.ZipFile(Path('dist') / package) as archive:
+                  assert archive.testzip() is None, f'Corrupt package: {package}'
+                  names = set(archive.namelist())
+                  for resource in ('Reynard', 'PlugIns/Reynard Helper.appex/Reynard Helper',
+                                   'PlugIns/OpenIn.appex/OpenIn', 'zh-Hans.lproj/Localizable.strings'):
+                      assert prefix + resource in names, f'Missing {resource} in {package}'
+                  if package.endswith('.tipa'):
+                      assert prefix + 'ts_ptrace_jit' in names, 'Missing TrollStore JIT helper'
+
+          app = Path('dist/Reynard/Payload/Reynard.app')
+          for executable, entitlements in (
+              ('Reynard', 'browser/Reynard/Entitlements/Reynard.private.entitlements'),
+              ('PlugIns/Reynard Helper.appex/Reynard Helper', 'browser/Helper/Entitlements/Reynard-Helper.private.entitlements'),
+              ('ts_ptrace_jit', 'browser/Reynard/JIT/Unsandboxed/ptrace_jit.entitlements'),
+          ):
+              actual = plistlib.loads(subprocess.check_output(['ldid', '-e', str(app / executable)]))
+              expected = plistlib.loads(Path(entitlements).read_bytes())
+              assert actual == expected, f'Incorrect entitlements: {executable}'
+          print('Verified IPA/TIPA integrity, Simplified Chinese resources, extensions and TrollStore entitlements.')
+          PY
+
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: Reynard-zh-Hans-${{ github.sha }}
           path: dist/Reynard.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload TrollStore TIPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Reynard-zh-Hans-TrollStore-${{ github.sha }}
+          path: dist/Reynard-TrollStore.tipa
           if-no-files-found: error
           retention-days: 14
